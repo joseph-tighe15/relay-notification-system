@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Push Notification Demo</title>
+</head>
+<body>
+  <button id="subscribe-btn">Enable Push Notifications</button>
+  <button id="send-notification-btn">Send Notification</button>
+  <p id="notification-status" role="status" aria-live="polite"></p>
+
+  <script>
+    const status = document.getElementById('notification-status');
+
+    document.getElementById('send-notification-btn').addEventListener('click', async () => {
+      status.textContent = 'Sending notification...';
+
+      try {
+        const response = await fetch('/send-notification', { method: 'POST' });
+        if (!response.ok) {
+          throw new Error(await response.text() || `Request failed (${response.status})`);
+        }
+
+        status.textContent = 'Notification sent successfully.';
+      } catch (error) {
+        console.error('Sending notification failed:', error);
+        status.textContent = `Failed to send notification: ${errorMessage(error)}`;
+      }
+    });
+
+    document.getElementById('subscribe-btn').addEventListener('click', async () => {
+      const button = document.getElementById('subscribe-btn');
+      if (!window.isSecureContext) {
+        status.textContent = 'Push notifications require a secure connection (HTTPS or localhost).';
+        return;
+      }
+      if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
+        status.textContent = 'Push notifications are not supported by this browser.';
+        return;
+      }
+
+      button.disabled = true;
+      status.textContent = 'Requesting notification permission...';
+      try {
+        const permission = await Notification.requestPermission();
+        if (permission !== 'granted') {
+          status.textContent = permission === 'denied'
+            ? 'Notification permission is blocked. Enable it in your browser settings and try again.'
+            : 'Notification permission was not granted.';
+          return;
+        }
+
+        const keyResponse = await fetch('/vapid-public-key');
+        if (!keyResponse.ok) {
+          throw new Error(await keyResponse.text() || `Could not load push configuration (${keyResponse.status})`);
+        }
+        const publicVapidKey = await keyResponse.json();
+        const applicationServerKey = urlBase64ToUint8Array(publicVapidKey);
+        const registration = await navigator.serviceWorker.register('/sw.js');
+        let subscription = await registration.pushManager.getSubscription();
+
+        if (subscription && !keysMatch(subscription.options.applicationServerKey, applicationServerKey)) {
+          await subscription.unsubscribe();
+          subscription = null;
+        }
+        if (!subscription) {
+          subscription = await registration.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey
+          });
+        }
+
+        const response = await fetch('/subscribe', {
+          method: 'POST',
+          body: JSON.stringify(subscription),
+          headers: { 'Content-Type': 'application/json' }
+        });
+        if (!response.ok) {
+          throw new Error(await response.text() || `Subscription registration failed (${response.status})`);
+        }
+
+        status.textContent = 'Push notifications are enabled.';
+      } catch (error) {
+        console.error('Subscription failed:', error);
+        status.textContent = `Could not enable push notifications: ${errorMessage(error)}`;
+      } finally {
+        button.disabled = false;
+      }
+    });
+
+    // Utility function to convert VAPID string key to Uint8Array
+    function urlBase64ToUint8Array(base64String) {
+      const padding = '='.repeat((4 - base64String.length % 4) % 4);
+      const base64 = (base64String + padding).replace(/\-/g, '+').replace(/_/g, '/');
+      const rawData = window.atob(base64);
+      const outputArray = new Uint8Array(rawData.length);
+      for (let i = 0; i < rawData.length; ++i) {
+        outputArray[i] = rawData.charCodeAt(i);
+      }
+      return outputArray;
+    }
+
+    function keysMatch(existingKey, expectedKey) {
+      if (!existingKey || existingKey.byteLength !== expectedKey.byteLength) {
+        return false;
+      }
+      const existingBytes = new Uint8Array(existingKey);
+      return expectedKey.every((byte, index) => byte === existingBytes[index]);
+    }
+
+    function errorMessage(error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  </script>
+</body>
+</html>
