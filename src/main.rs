@@ -12,6 +12,20 @@ use web_push_native::{
     p256::PublicKey, Auth, WebPushBuilder,
 };
 use tower_http::services::{ServeDir, ServeFile};
+use std::env;
+use std::error::Error;
+
+#[derive(Deserialize)]
+struct Announcement {
+    title: String,
+    author: Author,
+    posted_at: String,
+    message: String,
+}
+#[derive(Deserialize)]
+struct Author {
+    display_name: String,
+}
 
 // 1. Structure matching the payload coming from navigator.pushManager.subscribe()
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -33,7 +47,51 @@ struct AppState {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn Error>> {
+    dotenvy::dotenv().expect("Failed to read .env file");
+
+    // 1. Configuration
+    let canvas_domain = env::var("CANVAS_DOMAIN").unwrap_or_else(|_| "cuhsd.instructure.com".into());
+    let access_token = env::var("ACCESS_TOKEN")
+        .map_err(|_| "ACCESS_TOKEN must be set to a valid Canvas access token")?;
+    let course_id = env::var("COURSE_ID").unwrap_or_else(|_| "30095".into());
+
+    // 2. Setup the Request
+    let url = format!("https://{}/api/v1/announcements", canvas_domain);
+
+    // 3. Make the API Call
+    let client = reqwest::Client::builder()
+        .user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
+        .build()?;
+    let response = client.get(&url)
+        .bearer_auth(access_token)
+        .query(&[("context_codes[]", format!("course_{}", course_id))])
+        .send()
+        .await?;
+
+    // Include Canvas' error message to help diagnose authentication and permission failures.
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await?;
+        let body = body.chars().take(1000).collect::<String>();
+        return Err(format!("Canvas API returned {status}: {body}").into());
+    }
+
+    // Parse response
+    let announcements: Vec<Announcement> = response.json().await?;
+
+    // 4. Print the Results
+    if announcements.is_empty() {
+        println!("No announcements found for this course.");
+    } else {
+        for item in announcements {
+            println!("Title: {}", item.title);
+            println!("Posted by: {}", item.author.display_name);
+            println!("Date: {}", item.posted_at);
+            println!("Message: {}", item.message);
+            println!("-----------------------------------");
+        }
+    }
     let vapid_key_pair = ES256KeyPair::generate();
     let vapid_public_key = Base64UrlUnpadded::encode_string(
         &vapid_key_pair
@@ -65,9 +123,29 @@ async fn main() {
     println!("Axum Web Push server running on http://{address}");
     
     axum::serve(listener, app).await.unwrap();
+    Ok(())
 }
 
-// 2. Handler to accept and cache browser subscriptions
+async fn canvas_webhook_signup() {
+    let ContextId = "30095";
+    let ContextType = "course";
+    let EventTypes = ["announcement_created"];
+    let Format = "live-event";
+    let TransportMetadata = {
+        "url": "https://your-server.com/webhook-endpoint"
+    };
+    let TransportType = "https";
+    let url = format!("https://{}/api/v1/webhooks/subscriptions", canvas_domain);
+    let client = reqwest::Client::builder()
+        .user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
+        .build()?;
+    let response = client.get(&url)
+        .bearer_auth(access_token)
+        .query()
+        .send()
+        .await?;
+}
+
 async fn subscribe_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<SubscriptionPayload>,
